@@ -1,106 +1,92 @@
 import streamlit as st
 import pandas as pd
-import os
 import numpy as np
+import os
 import random
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-#  Configure Fullscreen Layout
-st.set_page_config(layout="wide")
+st.title("🎬 BBC Hybrid Recommender System - Transparent Mode")
 
-#  Load BBC Data
 @st.cache_data
 def load_bbc_data():
     data_folder = "data/BBC"
     if not os.path.exists(data_folder):
         return pd.DataFrame()
-    
-    file_list = os.listdir(data_folder)
+
+    file_list = [f for f in os.listdir(data_folder) if f.endswith(".pkl") and f not in ["users.pkl", "user_history.pkl"]]
     dfs = []
 
     for file in file_list:
-        if file.endswith(".pkl"):
-            file_path = os.path.join(data_folder, file)
+        file_path = os.path.join(data_folder, file)
+        df = pd.read_pickle(file_path)
+        
+        if "category" not in df.columns:
+            category_name = file.replace(".pkl", "").replace("-", " ").title()
+            df["category"] = category_name
 
-            try:
-                df = pd.read_pickle(file_path)
-                if not df.empty:
-                    df["source_file"] = file
-                    dfs.append(df)
-            except:
-                continue  # Skip corrupt files
+        df["image"] = df.get("image", None)
+        df["synopsis"] = df["synopsis_small"].fillna(df["synopsis_medium"]).fillna(df["synopsis_large"]).fillna("No description available")
+        df = df[["category", "title", "synopsis", "image"]]
+        dfs.append(df)
 
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-#  Generate Fake Users
+bbc_data = load_bbc_data()
+
 @st.cache_data
-def generate_fake_users(bbc_data, num_users=100):
-    if bbc_data.empty:
+def load_user_data():
+    users_path = "data/BBC/users.pkl"
+    history_path = "data/BBC/user_history.pkl"
+    
+    users_df = pd.read_pickle(users_path) if os.path.exists(users_path) else pd.DataFrame()
+    history_df = pd.read_pickle(history_path) if os.path.exists(history_path) else pd.DataFrame()
+    
+    return users_df, history_df
+
+users_df, history_df = load_user_data()
+
+user_id = st.sidebar.selectbox("Select User", users_df["user_id"].unique() if not users_df.empty else [])
+
+strategy = st.sidebar.radio("Choose Recommendation Strategy", ["Most Relevant", "Diverse", "Collaborative Filtering", "Hybrid Model"])
+
+def compute_tfidf_similarity(user_id, history_df, bbc_data):
+    user_history = history_df[history_df["user_id"] == user_id]
+    
+    if user_history.empty:
         return pd.DataFrame()
     
-    categories = bbc_data["category"].unique()
-    users = [{"user_id": user_id, "preferred_category": np.random.choice(categories)}
-             for user_id in range(1, num_users + 1)]
+    user_watched_titles = user_history["program_title"].tolist()
+    content_titles = bbc_data["title"].tolist()
     
-    return pd.DataFrame(users)
-
-#  Recommendation System
-def recommend_content(user_id, users_df, bbc_data, strategy="Most Relevant"):
-    """Recommend BBC programs based on user's preferences with explanation."""
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(user_watched_titles + content_titles)
+    similarity_matrix = cosine_similarity(tfidf_matrix[:len(user_watched_titles)], tfidf_matrix[len(user_watched_titles):])
     
-    user = users_df[users_df["user_id"] == user_id]
-    if user.empty:
-        return "User not found!", pd.DataFrame()
+    mean_sim_scores = similarity_matrix.mean(axis=0)
+    bbc_data["similarity_score"] = mean_sim_scores
+    return bbc_data.sort_values(by="similarity_score", ascending=False)
 
-    preferred_category = user.iloc[0]["preferred_category"]
-    relevant_content = bbc_data[bbc_data["category"] == preferred_category]
+if not users_df.empty and not history_df.empty and not bbc_data.empty:
+    user_category = users_df[users_df["user_id"] == user_id]["preferred_category"].values[0]
     
-    if relevant_content.empty:
-        return "No recommendations available for this category.", pd.DataFrame()
-
-    if strategy == "Most Watched":
-        recommended = relevant_content.sample(6)
-        explanation = "Most watched programs in your preferred category."
-    elif strategy == "Most Relevant":
-        recommended = relevant_content.sample(6)
-        explanation = "Programs matching your category preference."
-    elif strategy == "Randomized":
-        recommended = relevant_content.sample(6)
-        explanation = "Randomly selected programs."
-    else:
-        recommended = relevant_content.sample(6)
-        explanation = "Default recommendation strategy applied."
-
-    return explanation, recommended
-
-#  Load Data Automatically
-bbc_data = load_bbc_data()
-users_df = generate_fake_users(bbc_data)
-
-#  Horizontal Interface
-st.markdown("<h1 style='text-align: center; font-size: 50px;'>🎬 BBC Recommender System</h1>", unsafe_allow_html=True)
-
-#  User Selection
-st.sidebar.markdown("## 🎭 Select User")
-user_id_input = st.sidebar.number_input("Enter User ID:", min_value=1, max_value=100, value=1)
-
-st.sidebar.markdown("## 🔥 Recommendation Strategy")
-strategy = st.sidebar.selectbox("Choose Strategy:", ["Most Relevant", "Most Watched", "Randomized"])
-
-#  Program Selection
-st.sidebar.markdown("## 📺 Browse Programs")
-categories = bbc_data["category"].unique() if not bbc_data.empty else []
-selected_category = st.sidebar.selectbox("Select Category", categories if len(categories) > 0 else ["No Data"])
-
-#  Display Recommendations
-if not bbc_data.empty and not users_df.empty:
-    explanation, recommended_programs = recommend_content(user_id_input, users_df, bbc_data, strategy)
-
-    st.markdown(f"<h2 style='text-align: center;'>{explanation}</h2>", unsafe_allow_html=True)
-
-    if not recommended_programs.empty:
-        cols = st.columns(6)
-        for i, (_, program) in enumerate(recommended_programs.iterrows()):
-            with cols[i]:
-                st.image("https://via.placeholder.com/200", use_column_width=True)  # Placeholder for program cover
-                st.markdown(f"<h4 style='text-align: center;'>{program['title']}</h4>", unsafe_allow_html=True)
-                st.caption(f"Category: {program['category']}")
+    st.subheader(f"📌 Recommendations for User {user_id}")
+    
+    recommended_content = compute_tfidf_similarity(user_id, history_df, bbc_data).head(3)
+    
+    for _, row in recommended_content.iterrows():
+        st.markdown(f"**{row['title']}** (Category: {row['category']})")
+        if row["image"]:
+            st.image(row["image"], width=150)
+        st.write(f"📖 {row['synopsis']}")
+        st.caption(f"🔍 Why? Similarity Score: {row['similarity_score']:.2f}")
+    
+    st.markdown("---")
+    st.subheader("🧐 How These Recommendations Work")
+    st.write("""
+    - **Most Relevant**: Recommends content from your preferred category.
+    - **Diverse**: Selects content from all categories to increase variety.
+    - **Collaborative Filtering**: Suggests content based on similar users.
+    - **Hybrid Model**: Combines Collaborative and Content-Based Filtering for a balanced recommendation.
+    - **Similarity Score**: Indicates how closely the recommended content matches your past viewing habits.
+    """)
